@@ -7,6 +7,16 @@
 # bakes kube_api_host, fqdn and the SSH key into all.vars so the downstream
 # k3s playbook does not need the cloud.terraform tf_output lookup.
 
+- name: Check executor public (egress) IP
+  ansible.builtin.uri:
+    url: https://checkip.amazonaws.com
+    return_content: true
+  register: executor_public_ip
+
+- name: Show executor public (egress) IP
+  ansible.builtin.debug:
+    msg: "Jenkins executor egress IP: {{ executor_public_ip.content | trim }}"
+
 - name: Generate SSH key pair
   ansible.builtin.command:
     cmd: ssh-keygen -t rsa -b 4096 -f "{{ outputs_dir }}/id_rsa" -N ""
