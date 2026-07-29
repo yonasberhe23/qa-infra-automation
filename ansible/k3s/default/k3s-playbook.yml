@@ -111,6 +111,7 @@
         k3s_api_host: "{{ kube_api_host }}"
         k3s_fqdn: "{{ fqdn | default(kube_api_host) }}"
         public_ip: "{{ ansible_host }}"
+        k3s_node_external_ip: "{{ k3s_node_external_ip | default(true) }}"
         role_server_flags: "{{ server_flags | default('') }}"
         k3s_channel: "{{ channel | default('latest') }}"
 
@@ -229,6 +230,7 @@
         k3s_fqdn: "{{ fqdn | default(kube_api_host) }}"
         k3s_token: "{{ node_token }}"
         public_ip: "{{ ansible_host }}"
+        k3s_node_external_ip: "{{ k3s_node_external_ip | default(true) }}"
         role_server_flags: "{{ server_flags | default('') }}"
         k3s_channel: "{{ channel | default('latest') }}"
       when:
@@ -265,6 +267,7 @@
         k3s_fqdn: "{{ fqdn | default(kube_api_host) }}"
         k3s_token: "{{ node_token }}"
         public_ip: "{{ ansible_host }}"
+        k3s_node_external_ip: "{{ k3s_node_external_ip | default(true) }}"
         k3s_worker_flags: "{{ worker_flags | default('') }}"
         k3s_channel: "{{ channel | default('latest') }}"
       when:

@@ -9,6 +9,12 @@
       kubeconfig_file: '{{ outputs_dir }}/kubeconfig-rancher.yaml'
       node_token_file: '/tmp/node_token_rancher.txt'
       channel: "stable"
+      # Our security group only allows self-referencing rules (matched by
+      # private IP), so registering each node's public IP as its
+      # node-external-ip breaks k3s's HA supervisor/remotedialer tunnel
+      # between control-plane peers. Disable it; TLS SAN entries still
+      # include the public IP separately for external access.
+      k3s_node_external_ip: false
     dest: "{{ outputs_dir }}/rancher-server-k3s-vars.yaml"
     mode: "0644"
   when: job_type == 'recurring'

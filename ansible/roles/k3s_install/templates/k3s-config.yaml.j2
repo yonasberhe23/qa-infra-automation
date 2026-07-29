@@ -87,8 +87,16 @@ token: "{{ k3s_token }}"
 {% endif %}
 {% endif %}
 
-# Advertise public/external IP to the cluster (used by kubelet/kube-proxy)
-{% if public_ip is defined and public_ip | trim != '' %}
+# Advertise public/external IP to the cluster (used by kubelet/kube-proxy).
+# Opt-out via k3s_node_external_ip: false (defaults to true, i.e. unchanged
+# behavior) for topologies where all nodes share a VPC behind a security
+# group that only allows self-referencing rules: those rules match a group
+# member's private IP only, so k3s's HA supervisor/remotedialer tunnel
+# (which prefers node-external-ip for peer-to-peer traffic between
+# control-plane nodes) can get silently blocked when it hairpins over a
+# node's public IP. public_ip is still used below for TLS SAN validity
+# regardless of this setting.
+{% if public_ip is defined and public_ip | trim != '' and (k3s_node_external_ip | default(true)) %}
 node-external-ip:
   - "{{ public_ip }}"
 {% endif %}
