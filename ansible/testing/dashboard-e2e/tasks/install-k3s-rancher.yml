@@ -92,6 +92,36 @@
   failed_when: not import_kubeconfig.stat.exists
   when: create_initial_clusters | bool
 
+# Debug: the k3s-playbook's own readiness check only looks at Pod.status.phase,
+# which is satisfied by a pod that reported Running once and then started
+# crash-looping. Snapshot node/pod health here so the Jenkins console shows
+# the real state of the cluster before we hand off to the Rancher helm install.
+- name: "Debug: cluster node status before Rancher deploy"
+  ansible.builtin.command:
+    cmd: kubectl --kubeconfig {{ outputs_dir }}/kubeconfig-rancher.yaml get nodes -o wide
+  register: pre_deploy_nodes
+  changed_when: false
+  failed_when: false
+  when: job_type == 'recurring'
+
+- name: "Debug: show cluster node status before Rancher deploy"
+  ansible.builtin.debug:
+    msg: "{{ pre_deploy_nodes.stdout_lines | default(['kubectl unavailable: ' + (pre_deploy_nodes.stderr | default('unknown error'))]) }}"
+  when: job_type == 'recurring'
+
+- name: "Debug: kube-system pod health before Rancher deploy"
+  ansible.builtin.command:
+    cmd: kubectl --kubeconfig {{ outputs_dir }}/kubeconfig-rancher.yaml get pods -A -o wide
+  register: pre_deploy_pods
+  changed_when: false
+  failed_when: false
+  when: job_type == 'recurring'
+
+- name: "Debug: show kube-system pod health before Rancher deploy"
+  ansible.builtin.debug:
+    msg: "{{ pre_deploy_pods.stdout_lines | default(['kubectl unavailable: ' + (pre_deploy_pods.stderr | default('unknown error'))]) }}"
+  when: job_type == 'recurring'
+
 - name: Write rancher vars
   ansible.builtin.copy:
     content: |
@@ -111,20 +141,80 @@
     mode: "0644"
   when: job_type == 'recurring'
 
-- name: Deploy Rancher
-  ansible.builtin.command:
-    cmd: >-
-      ansible-playbook
-      {{ qa_infra_dir }}/ansible/rancher/default-ha/rancher-playbook.yml
-      --extra-vars @{{ outputs_dir }}/rancher-vars.yaml
-      {{ ansible_verbose_flag }}
-    chdir: "{{ qa_infra_dir }}"
-  environment:
-    ANSIBLE_CONFIG: "{{ qa_infra_dir }}/ansible/k3s/default/ansible.cfg"
-  async: 1200
-  poll: 30
-  changed_when: true
+- name: Deploy Rancher (with diagnostics on failure)
   when: job_type == 'recurring'
+  block:
+    - name: Deploy Rancher
+      ansible.builtin.command:
+        cmd: >-
+          ansible-playbook
+          {{ qa_infra_dir }}/ansible/rancher/default-ha/rancher-playbook.yml
+          --extra-vars @{{ outputs_dir }}/rancher-vars.yaml
+          {{ ansible_verbose_flag }}
+        chdir: "{{ qa_infra_dir }}"
+      environment:
+        ANSIBLE_CONFIG: "{{ qa_infra_dir }}/ansible/k3s/default/ansible.cfg"
+      async: 1200
+      poll: 30
+      changed_when: true
+  rescue:
+    # Deploy Rancher failed or hit its async timeout. Dump cluster state here
+    # so we don't have to SSH into the nodes after the fact to find out why.
+    - name: "Debug: node status at time of Deploy Rancher failure"
+      ansible.builtin.command:
+        cmd: kubectl --kubeconfig {{ outputs_dir }}/kubeconfig-rancher.yaml get nodes -o wide
+      register: fail_nodes
+      changed_when: false
+      failed_when: false
+
+    - name: "Debug: show node status at time of failure"
+      ansible.builtin.debug:
+        msg: "{{ fail_nodes.stdout_lines | default(['kubectl unavailable: ' + (fail_nodes.stderr | default('unknown error'))]) }}"
+
+    - name: "Debug: pod status (with restart counts) at time of Deploy Rancher failure"
+      ansible.builtin.command:
+        cmd: kubectl --kubeconfig {{ outputs_dir }}/kubeconfig-rancher.yaml get pods -A -o wide
+      register: fail_pods
+      changed_when: false
+      failed_when: false
+
+    - name: "Debug: show pod status at time of failure"
+      ansible.builtin.debug:
+        msg: "{{ fail_pods.stdout_lines | default(['kubectl unavailable: ' + (fail_pods.stderr | default('unknown error'))]) }}"
+
+    - name: "Debug: recent cluster events at time of Deploy Rancher failure"
+      ansible.builtin.command:
+        cmd: kubectl --kubeconfig {{ outputs_dir }}/kubeconfig-rancher.yaml get events -A --sort-by=.lastTimestamp
+      register: fail_events
+      changed_when: false
+      failed_when: false
+
+    - name: "Debug: show recent cluster events at time of failure"
+      ansible.builtin.debug:
+        msg: "{{ fail_events.stdout_lines[-50:] if fail_events.stdout_lines is defined else ['kubectl unavailable: ' + (fail_events.stderr | default('unknown error'))] }}"
+
+    - name: "Debug: describe non-Running/non-Completed pods at time of failure"
+      ansible.builtin.shell: >-
+        set -o pipefail;
+        kubectl --kubeconfig {{ outputs_dir }}/kubeconfig-rancher.yaml get pods -A --no-headers 2>/dev/null
+        | awk '$4!="Running" && $4!="Completed" {print $1, $2}'
+        | while read -r ns name; do
+            echo "=== describe ${ns}/${name} ===";
+            kubectl --kubeconfig {{ outputs_dir }}/kubeconfig-rancher.yaml describe pod -n "${ns}" "${name}" | tail -40;
+          done
+      register: fail_describe
+      changed_when: false
+      failed_when: false
+      args:
+        executable: /bin/bash
+
+    - name: "Debug: show describe output for non-healthy pods"
+      ansible.builtin.debug:
+        msg: "{{ fail_describe.stdout_lines | default(['none, or kubectl unavailable']) }}"
+
+    - name: Re-raise Deploy Rancher failure
+      ansible.builtin.fail:
+        msg: "Deploy Rancher failed. See diagnostics above for cluster state at time of failure."
 
 - name: Wait for import cluster API
   ansible.builtin.command:
