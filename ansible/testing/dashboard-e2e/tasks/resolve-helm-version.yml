@@ -12,6 +12,7 @@
       rancher-latest:
         url: https://charts.optimus.rancher.io/server-charts/latest
         image: stgregistry.suse.com/rancher/rancher
+        head_charts: true
       rancher-alpha:
         url: https://charts.optimus.rancher.io/server-charts/alpha
         image: stgregistry.suse.com/rancher/rancher
@@ -38,12 +39,28 @@
       ansible.builtin.set_fact:
         rancher_chart_url: "{{ _repo.url }}"
         rancher_image: "{{ _repo.image }}"
+        rancher_repo_has_head_charts: "{{ _repo.head_charts | default(false) }}"
+
+- name: Extract version string from image tag
+  ansible.builtin.set_fact:
+    version_string: "{{ rancher_image_tag | regex_replace('-.*$', '') }}"
+
+# Since Aug 2026 the Prime `latest` repo also holds head charts for every
+# release line (2.16.0-<sha>-head), so a repo-wide `sort -V` no longer means
+# "newest": it orders by the SHA. Head charts are picked from the index by
+# creation date instead. See README "Prime head builds".
+- name: Classify the requested build
+  ansible.builtin.set_fact:
+    release_line: "{{ version_string | regex_replace('^v', '') if version_string != 'head' else '' }}"
+    head_requested: "{{ rancher_image_tag == 'head' or rancher_image_tag.endswith('-head') }}"
 
 - name: Add helm repo
   ansible.builtin.command:
-    cmd: "helm repo add {{ rancher_helm_repo }} {{ rancher_chart_url }}"
+    # --force-update matters: without it helm refuses to re-point an existing
+    # repo name and silently keeps the old URL, so a stale `rancher-latest`
+    # left over from an earlier run would resolve and install the wrong charts.
+    cmd: "helm repo add --force-update {{ rancher_helm_repo }} {{ rancher_chart_url }}"
   changed_when: false
-  failed_when: false
   retries: 3
   delay: 5
   register: _helm_add
@@ -58,10 +75,6 @@
   register: _helm_update
   until: _helm_update.rc == 0
 
-- name: Extract version string from image tag
-  ansible.builtin.set_fact:
-    version_string: "{{ rancher_image_tag | regex_replace('-.*$', '') }}"
-
 - name: Resolve Rancher chart version
   ansible.builtin.shell:
     cmd: |
@@ -70,6 +83,18 @@
       REPO="{{ rancher_helm_repo }}"
       VS="{{ version_string }}"
       SEARCH=$(helm search repo "${REPO}" --devel --versions)
+
+      # An exact chart match wins outright. Without this, `sort -V` ranks a
+      # pre-release suffix above the release it precedes (2.13.4-alpha5 above
+      # 2.13.4), so a request for a specific version returned a later
+      # pre-release of it.
+      EXACT=$(echo "${SEARCH}" \
+        | awk -v v="${TAG#v}" '$1 ~ /\/rancher$/ && $2 == v {print $2}' \
+        | head -1)
+      if [ -n "${EXACT}" ]; then
+        echo "${EXACT}"
+        exit 0
+      fi
 
       case "${TAG}" in
         head)
@@ -101,16 +126,113 @@
       esac
   register: helm_version_result
   changed_when: false
-  failed_when: helm_version_result.stdout | trim == ''
+  # A repo with head charts gets a second chance below, so an empty result is
+  # only fatal here for repos that have nothing else to fall back to.
+  failed_when:
+    - helm_version_result.stdout | trim == ''
+    - not rancher_repo_has_head_charts | bool
+  when: not (rancher_repo_has_head_charts | bool and head_requested | bool)
 
-- name: Set rancher_version
+- name: Record the helm-resolved chart version
   ansible.builtin.set_fact:
-    rancher_version: "{{ helm_version_result.stdout | trim }}"
+    rancher_version: "{{ (helm_version_result.stdout | default('')) | trim }}"
+
+# Runs when a head build was asked for explicitly (`head`, `v2.16-head`) and
+# as the fallback when the Prime repo holds no -rc chart for the line, which
+# is the case for release lines that only ever get Prime head builds.
+- name: Resolve Prime head chart from the repo index
+  when:
+    - rancher_repo_has_head_charts | bool
+    - head_requested | bool or rancher_version | length == 0
+  block:
+    - name: Fetch the chart repo index
+      ansible.builtin.uri:
+        url: "{{ rancher_chart_url }}/index.yaml"
+        return_content: true
+      register: _chart_index
+      retries: 3
+      delay: 5
+      until: _chart_index.status == 200
+
+    - name: Collect head charts from the index
+      ansible.builtin.set_fact:
+        _head_charts: >-
+          {{ ((_chart_index.content | from_yaml).entries.rancher | default([]))
+             | selectattr('version', 'search', '-head$') | list }}
+
+    - name: Assert the repo publishes head charts
+      ansible.builtin.assert:
+        that:
+          - _head_charts | length > 0
+        fail_msg: >-
+          No head charts found in {{ rancher_chart_url }} for
+          rancher_image_tag '{{ rancher_image_tag }}'.
+
+    # Only needed for a bare `head` (master): pick the highest release line
+    # present. sort -V is used because 2.9 must rank below 2.16.
+    - name: List the head release lines
+      ansible.builtin.set_fact:
+        _head_lines: >-
+          {{ _head_charts | map(attribute='version')
+             | map('regex_replace', '^(\d+\.\d+)\..*$', '\1')
+             | unique | list }}
+
+    - name: Determine the newest head release line
+      ansible.builtin.command:
+        cmd: "sort -V"
+        stdin: "{{ _head_lines | join('\n') }}"
+      register: _sorted_head_lines
+      changed_when: false
+      when: release_line | length == 0
+
+    - name: Select the newest head chart for the release line
+      vars:
+        _line: >-
+          {{ release_line if release_line | length > 0
+             else (_sorted_head_lines.stdout_lines | last | trim) }}
+        _line_charts: >-
+          {{ _head_charts
+             | selectattr('version', 'match', (_line | regex_escape) ~ '\.')
+             | list }}
+      ansible.builtin.set_fact:
+        # The index carries a creation date per chart; the SHA in the version
+        # says nothing about build order, so date is the only sound ordering.
+        _head_chart: "{{ (_line_charts | sort(attribute='created') | last) | default({}, true) }}"
+        _head_line: "{{ _line }}"
+
+    - name: Assert a head chart exists for the release line
+      ansible.builtin.assert:
+        that:
+          - _head_chart.version is defined
+        fail_msg: >-
+          No head chart for {{ _head_line }} in {{ rancher_chart_url }}.
+          Available lines: {{ _head_lines | join(', ') }}
+
+    - name: Use the head chart version and its app version
+      ansible.builtin.set_fact:
+        rancher_version: "{{ _head_chart.version }}"
+        rancher_head_app_version: "{{ _head_chart.appVersion | default('') }}"
+
+- name: Assert a chart version was resolved
+  ansible.builtin.assert:
+    that:
+      - rancher_version | length > 0
+    fail_msg: >-
+      No chart matched rancher_image_tag '{{ rancher_image_tag }}' in
+      {{ rancher_chart_url }} ({{ rancher_helm_repo }}).
+
+# A head chart version carries a commit SHA the version test cannot order, so
+# comparisons downstream use the release line only.
+- name: Record the resolved release line
+  ansible.builtin.set_fact:
+    rancher_release_line: "{{ rancher_version | regex_replace('^(\\d+\\.\\d+).*$', '\\1') }}"
 
 - name: Set resolved image tag
   ansible.builtin.set_fact:
     rancher_image_tag_resolved: >-
-      {%- if rancher_image | length > 0 -%}
+      {%- if rancher_head_app_version | default('') | length > 0 -%}
+        {{ rancher_head_app_version }}
+      {%- elif rancher_image | length > 0 -%}
         v{{ rancher_version }}
       {%- else -%}
         {{ rancher_image_tag }}
@@ -121,13 +243,12 @@
     nodejs_version: "22.14.0"
   when:
     - rancher_image_tag != 'head'
-    - rancher_version is defined
     - rancher_version | length > 0
-    - rancher_version is version('2.14', '<')
+    - rancher_release_line is version('2.14', '<')
 
 - name: Report resolved versions
   ansible.builtin.debug:
     msg: >-
       Rancher {{ rancher_version }},
       image_tag={{ rancher_image_tag_resolved }},
-      helm_repo={{ rancher_helm_repo }}
+      helm_repo={{ rancher_helm_repo }} ({{ rancher_chart_url }})

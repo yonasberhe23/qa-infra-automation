@@ -311,11 +311,48 @@ version becomes the image tag (e.g. `2.14.0-alpha13` → `v2.14.0-alpha13`).
 | `rancher_helm_repo` | Chart source | Image registry | Image tag |
 |---------------------|-------------|----------------|-----------|
 | `rancher-prime` | charts.rancher.com/.../prime | `registry.suse.com` | `v{chart_version}` |
-| `rancher-latest` | charts.optimus.rancher.io/.../latest | `stgregistry.suse.com` | `v{highest -rc match}` |
+| `rancher-latest` | charts.optimus.rancher.io/.../latest | `stgregistry.suse.com` | `v{highest -rc match}`, or the head chart's `appVersion` |
 | `rancher-alpha` | charts.optimus.rancher.io/.../alpha | `stgregistry.suse.com` | `v{highest -alpha match}` |
 | `rancher-community` | releases.rancher.com/.../stable | Docker Hub | `rancher_image_tag` as-is |
 | `rancher-com-rc` | releases.rancher.com/.../latest | Docker Hub | `rancher_image_tag` as-is |
 | `rancher-com-alpha` | releases.rancher.com/.../alpha | Docker Hub | `rancher_image_tag` as-is |
+
+An exact match always wins: if `rancher_image_tag` names a chart version that
+exists in the repo (`v2.13.4` → `2.13.4`), that chart is used and no ranking is
+done. Ranking only decides what a partial tag such as `v2.13` means.
+
+### Prime head builds
+
+Since August 2026 the Release Team publishes Prime head builds, one per
+scheduled build of each release branch, into the **same** `rancher-latest`
+repo that holds the RCs. Two things follow, and both are handled here:
+
+- Chart versions carry the patch and the commit: `2.16.0-<sha>-head`. Ordering
+  them with `sort -V` sorts by the SHA, which is meaningless, so head charts
+  are picked by the `created` date in the repo's `index.yaml` instead.
+- Release lines that only get Prime head builds (2.15 and 2.16 at the time of
+  writing) have no `-rc` chart at all. A bare `v2.15` used to resolve to
+  nothing and fail the run.
+
+`rancher-latest` therefore resolves in this order:
+
+| `rancher_image_tag` | resolves to |
+|---------------------|-------------|
+| `v2.14` | highest `2.14.x-rc`; if the line has none, the newest `2.14.x-<sha>-head` |
+| `v2.16` | no RCs exist for the line → newest `2.16.x-<sha>-head` |
+| `v2.16-head` | newest `2.16.x-<sha>-head`, RCs ignored |
+| `head` | newest head chart of the highest line in the repo (master) |
+
+RCs keep priority, so existing `v2.14`/`v2.13` jobs are unaffected. The image
+tag for a head build comes from the chart's `appVersion`
+(`v2.16.0-<sha>-head`), which pins the run to the exact build that was tested.
+Note that `rancher_image_tag` still decides the dashboard branch, so `v2.16`
+and `v2.16-head` both check out `release-2.16`.
+
+Community repos are unchanged: their head charts still live in the per-line
+`charts.optimus.rancher.io/server-charts/release-{major}.{minor}` repos, which
+this playbook does not use, and `rancher-com-rc` with `v2.14-head` still
+resolves an RC chart with the Docker Hub floating tag.
 
 ### Examples
 
@@ -328,12 +365,18 @@ rancher_image_tag: "v2.13.4"
 # Prime RC - test the latest 2.13 release candidate
 rancher_helm_repo: "rancher-latest"
 rancher_image_tag: "v2.13"
-# → highest 2.13.x-rc from optimus/latest, image stgregistry.suse.com/rancher/rancher:v2.13.4-rc1
+# → highest 2.13.x-rc from optimus/latest, image stgregistry.suse.com/rancher/rancher:v2.13.8-rc1
+
+# Prime head - newest scheduled build of release-2.16
+rancher_helm_repo: "rancher-latest"
+rancher_image_tag: "v2.16"        # or "v2.16-head" to skip RCs on a line that has them
+# → newest 2.16.0-<sha>-head from optimus/latest by creation date,
+#   image stgregistry.suse.com/rancher/rancher:v2.16.0-<sha>-head
 
 # Prime alpha - test the next minor
 rancher_helm_repo: "rancher-alpha"
 rancher_image_tag: "v2.14"
-# → highest 2.14.x-alpha from optimus/alpha, image stgregistry.suse.com/rancher/rancher:v2.14.0-alpha13
+# → highest 2.14.x-alpha from optimus/alpha, image stgregistry.suse.com/rancher/rancher:v2.14.5-alpha1
 
 # Community GA - stable community release
 rancher_helm_repo: "rancher-community"
