@@ -317,24 +317,15 @@ version becomes the image tag (e.g. `2.14.0-alpha13` → `v2.14.0-alpha13`).
 | `rancher-com-rc` | releases.rancher.com/.../latest | Docker Hub | `rancher_image_tag` as-is |
 | `rancher-com-alpha` | releases.rancher.com/.../alpha | Docker Hub | `rancher_image_tag` as-is |
 
-An exact match always wins: if `rancher_image_tag` names a chart version that
-exists in the repo (`v2.13.4` → `2.13.4`), that chart is used and no ranking is
-done. Ranking only decides what a partial tag such as `v2.13` means.
+### Prime head builds (temporary workaround)
 
-### Prime head builds
+Since August 2026 the Release Team publishes Prime head builds into the **same**
+`rancher-latest` repo that holds the RCs, versioned `2.16.0-<sha>-head`. Lines
+that only get head builds (2.15 and 2.16) have no `-rc` chart at all, so a bare
+`v2.15` resolved to nothing and failed the run.
 
-Since August 2026 the Release Team publishes Prime head builds, one per
-scheduled build of each release branch, into the **same** `rancher-latest`
-repo that holds the RCs. Two things follow, and both are handled here:
-
-- Chart versions carry the patch and the commit: `2.16.0-<sha>-head`. Ordering
-  them with `sort -V` sorts by the SHA, which is meaningless, so head charts
-  are picked by the `created` date in the repo's `index.yaml` instead.
-- Release lines that only get Prime head builds (2.15 and 2.16 at the time of
-  writing) have no `-rc` chart at all. A bare `v2.15` used to resolve to
-  nothing and fail the run.
-
-`rancher-latest` therefore resolves in this order:
+`rancher-latest` now falls back to head charts, picked by the `created` date in
+the repo's `index.yaml` (`sort -V` would order them by the meaningless SHA):
 
 | `rancher_image_tag` | resolves to |
 |---------------------|-------------|
@@ -343,16 +334,14 @@ repo that holds the RCs. Two things follow, and both are handled here:
 | `v2.16-head` | newest `2.16.x-<sha>-head`, RCs ignored |
 | `head` | newest head chart of the highest line in the repo (master) |
 
-RCs keep priority, so existing `v2.14`/`v2.13` jobs are unaffected. The image
-tag for a head build comes from the chart's `appVersion`
-(`v2.16.0-<sha>-head`), which pins the run to the exact build that was tested.
-Note that `rancher_image_tag` still decides the dashboard branch, so `v2.16`
+RCs keep priority, so existing `v2.14`/`v2.13` jobs are unaffected. A head
+build's image tag comes from the chart's `appVersion`, pinning the run to the
+exact build. `rancher_image_tag` still decides the dashboard branch, so `v2.16`
 and `v2.16-head` both check out `release-2.16`.
 
-Community repos are unchanged: their head charts still live in the per-line
-`charts.optimus.rancher.io/server-charts/release-{major}.{minor}` repos, which
-this playbook does not use, and `rancher-com-rc` with `v2.14-head` still
-resolves an RC chart with the Docker Hub floating tag.
+This is a stopgap for the migration. Community repos are untouched. Revisit
+once RT finishes moving alphas to the same repo and switches the floating
+`-head` tags over.
 
 ### Examples
 

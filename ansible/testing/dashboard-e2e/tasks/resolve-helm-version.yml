@@ -45,10 +45,12 @@
   ansible.builtin.set_fact:
     version_string: "{{ rancher_image_tag | regex_replace('-.*$', '') }}"
 
-# Since Aug 2026 the Prime `latest` repo also holds head charts for every
-# release line (2.16.0-<sha>-head), so a repo-wide `sort -V` no longer means
-# "newest": it orders by the SHA. Head charts are picked from the index by
-# creation date instead. See README "Prime head builds".
+# TEMPORARY WORKAROUND (Aug 2026 Release Team migration).
+# The Prime `latest` repo now also holds head charts for every release line
+# (2.16.0-<sha>-head), and 2.15/2.16 have no -rc chart at all, so the -rc-only
+# lookup below returns nothing for them. A repo-wide `sort -V` is no help
+# either: it orders those versions by their SHA. Head charts are picked from
+# the repo index by creation date instead. See README "Prime head builds".
 - name: Classify the requested build
   ansible.builtin.set_fact:
     release_line: "{{ version_string | regex_replace('^v', '') if version_string != 'head' else '' }}"
@@ -83,18 +85,6 @@
       REPO="{{ rancher_helm_repo }}"
       VS="{{ version_string }}"
       SEARCH=$(helm search repo "${REPO}" --devel --versions)
-
-      # An exact chart match wins outright. Without this, `sort -V` ranks a
-      # pre-release suffix above the release it precedes (2.13.4-alpha5 above
-      # 2.13.4), so a request for a specific version returned a later
-      # pre-release of it.
-      EXACT=$(echo "${SEARCH}" \
-        | awk -v v="${TAG#v}" '$1 ~ /\/rancher$/ && $2 == v {print $2}' \
-        | head -1)
-      if [ -n "${EXACT}" ]; then
-        echo "${EXACT}"
-        exit 0
-      fi
 
       case "${TAG}" in
         head)
